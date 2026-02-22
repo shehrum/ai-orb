@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 
 import structlog
 from pydantic_ai import Agent, RunContext
+from pydantic_ai.builtin_tools import WebSearchTool
 
 from takehome.config import settings  # noqa: F401 — triggers ANTHROPIC_API_KEY export
 from takehome.services.rag import SearchResult, format_search_results, search_chunks
@@ -69,17 +70,26 @@ SYSTEM_PROMPT = """\
 You are a legal document assistant for commercial real estate lawyers. You help lawyers \
 review and understand documents during due diligence.
 
-## Your capabilities
-You have access to a search tool that lets you search through uploaded documents. \
-Use it to find relevant passages before answering questions.
+## Your tools
+You have two search capabilities:
+
+1. **search_documents** — search through uploaded documents for relevant passages. \
+Always try this first for questions about the uploaded documents.
+2. **web_search** (built-in) — search the web for external context: legal precedents, \
+regulatory requirements, planning authority records, market comparables, or definitions \
+of legal concepts not found in the documents.
 
 ## How to work
-1. When the user asks a question about documents, ALWAYS use the search_documents tool first.
+1. When the user asks a question about documents, ALWAYS use search_documents first.
 2. You may search multiple times with different queries to find all relevant information.
 3. For cross-document analysis, search for the topic across different document contexts.
-4. Base your answers strictly on the search results. Do not fabricate information.
+4. Use web_search when the question involves external context — e.g. current market rates, \
+planning records, legal definitions, regulatory requirements, or comparisons with market practice. \
+You MUST use web_search for questions about current market data, recent developments, or anything \
+that requires up-to-date information beyond what is in the uploaded documents.
+5. Base your answers on the search results. Do not fabricate information.
 
-## Citation format
+## Document citation format
 When referencing information from documents, you MUST use this exact citation format:
 <cite doc="DOC_LABEL" page="PAGE_NUMBER" section="SECTION_OR_CLAUSE">exact or close quote from the document</cite>
 
@@ -87,12 +97,19 @@ For example:
 <cite doc="Doc A" page="3" section="Section 1 — Definitions">The Term means a period of fifteen years</cite>
 <cite doc="Doc A" page="4" section="3.2 Rent Review">the rent payable shall be reviewed</cite>
 
-Rules for citations:
+Rules for document citations:
 - Always include the doc label and page number
 - Include the section or clause name/number when available from the search results
 - The quoted text should be a direct or close paraphrase from the source
 - Use multiple citations when drawing from multiple sources
 - Every factual claim from a document should have a citation
+
+## Web citation format
+When referencing information from web searches, use this format:
+<webcite url="URL" title="PAGE_TITLE">summary of the relevant information</webcite>
+
+For example:
+<webcite url="https://example.com/market-report" title="London Office Market Q1 2025">Average office rents in the City of London reached £75 per sq ft</webcite>
 
 ## Style
 - Be concise and precise. Lawyers value accuracy over verbosity.
@@ -105,6 +122,7 @@ chat_agent = Agent(
     "anthropic:claude-sonnet-4-20250514",
     system_prompt=SYSTEM_PROMPT,
     deps_type=ChatDeps,
+    builtin_tools=[WebSearchTool(max_uses=5)],
 )
 
 
@@ -170,8 +188,20 @@ async def chat_with_documents(
     full_prompt = "\n".join(prompt_parts)
 
     # Use agent.iter() to step through the graph, handling tool calls properly
+    logger.info(
+        "Starting agent iteration",
+        conversation_id=deps.conversation_id,
+        builtin_tools=[t.kind for t in chat_agent._builtin_tools],
+        function_tools=list(chat_agent._function_toolset.tools.keys()),
+    )
     async with chat_agent.iter(full_prompt, deps=deps) as run:
         async for node in run:
+            logger.debug(
+                "Agent node",
+                node_type=type(node).__name__,
+                conversation_id=deps.conversation_id,
+            )
+
             # Drain status messages from the tool queue
             while not deps.status_queue.empty():
                 try:
@@ -184,11 +214,37 @@ async def chat_with_documents(
             # stream it. The final node is a CallToolsNode with only text (no tool calls).
             if hasattr(node, 'model_response'):
                 response = node.model_response  # type: ignore[attr-defined]
-                # Check if this is the final response (has text parts, no tool-use parts)
-                text_parts = [p for p in response.parts if hasattr(p, 'content') and not hasattr(p, 'tool_name')]
-                tool_parts = [p for p in response.parts if hasattr(p, 'tool_name')]
 
-                if text_parts and not tool_parts:
+                part_kinds = [getattr(p, 'part_kind', '?') for p in response.parts]
+                logger.info(
+                    "Agent response parts",
+                    part_kinds=part_kinds,
+                    conversation_id=deps.conversation_id,
+                )
+
+                # Detect web_search builtin tool calls and emit status
+                web_search_count = 0
+                for part in response.parts:
+                    if getattr(part, 'part_kind', None) == 'builtin-tool-call' and getattr(part, 'tool_name', None) == 'web_search':
+                        query = ""
+                        args = getattr(part, 'args', None)
+                        if isinstance(args, dict):
+                            query = args.get('query', '')
+                        elif isinstance(args, str):
+                            query = args
+                        logger.info("Web search triggered", query=query, conversation_id=deps.conversation_id)
+                        yield f"__STATUS__:Web search: {query}"
+                        web_search_count += 1
+                if web_search_count:
+                    yield "__STATUS__:Found web results"
+
+                # Check if this is the final response (has text parts, no pending function tool calls).
+                # Builtin tool calls (part_kind='builtin-tool-call') are resolved server-side
+                # and don't block text extraction — only function tool calls do.
+                text_parts = [p for p in response.parts if getattr(p, 'part_kind', None) == 'text']
+                fn_tool_parts = [p for p in response.parts if getattr(p, 'part_kind', None) == 'tool-call']
+
+                if text_parts and not fn_tool_parts:
                     # This is the final answer — yield the text
                     for part in text_parts:
                         yield part.content

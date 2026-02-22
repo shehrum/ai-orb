@@ -115,6 +115,14 @@ body {
 	text-decoration: underline;
 }
 
+.prose a[href^="http"] {
+	color: #059669;
+}
+
+.prose a[href^="http"]:hover {
+	color: #047857;
+}
+
 /* Citation pill styling */
 .citation-pill {
 	display: inline-flex;

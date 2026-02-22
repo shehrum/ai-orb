@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from datetime import datetime
@@ -138,9 +139,9 @@ async def send_message(
         """Generate SSE events with the streamed LLM response."""
         full_response = ""
 
-        # Send status event if we have documents (agent will search)
+        # Send status event — the agent will decide whether to search docs, web, or both
         if has_documents:
-            status_data = json.dumps({"type": "status", "content": "Searching documents..."})
+            status_data = json.dumps({"type": "status", "content": "Analyzing question..."})
             yield f"data: {status_data}\n\n"
 
         try:
@@ -153,6 +154,7 @@ async def send_message(
                     session=agent_session,
                 )
 
+                pending_status = False
                 async for chunk in chat_with_documents(
                     user_message=body.content,
                     conversation_history=conversation_history,
@@ -163,11 +165,28 @@ async def send_message(
                         status_msg = chunk[len("__STATUS__:"):]
                         event_data = json.dumps({"type": "status", "content": status_msg})
                         yield f"data: {event_data}\n\n"
+                        pending_status = True
                         continue
 
+                    # If we just sent status events, pause briefly so the
+                    # browser flushes and renders them before content arrives.
+                    if pending_status:
+                        await asyncio.sleep(0.05)
+                        pending_status = False
+
                     full_response += chunk
-                    event_data = json.dumps({"type": "content", "content": chunk})
-                    yield f"data: {event_data}\n\n"
+
+                    # Stream large chunks in smaller pieces so the UI can
+                    # render incrementally (builtin tools return all text at once).
+                    CHUNK_SIZE = 80
+                    if len(chunk) > CHUNK_SIZE:
+                        for i in range(0, len(chunk), CHUNK_SIZE):
+                            piece = chunk[i : i + CHUNK_SIZE]
+                            event_data = json.dumps({"type": "content", "content": piece})
+                            yield f"data: {event_data}\n\n"
+                    else:
+                        event_data = json.dumps({"type": "content", "content": chunk})
+                        yield f"data: {event_data}\n\n"
 
         except Exception:
             logger.exception(

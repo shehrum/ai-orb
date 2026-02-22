@@ -3,18 +3,24 @@
  */
 
 const CITE_RE = /<cite\s+doc="([^"]+)"\s+page="(\d+)"(?:\s+section="([^"]*)")?\s*>(.*?)<\/cite>/gs;
+const WEBCITE_RE = /<webcite\s+url="([^"]+)"\s+title="([^"]*)">(.*?)<\/webcite>/gs;
 
 /**
  * Convert <cite> tags to readable inline format with section info.
  * The [Doc X, Section, p.N] badges are later turned into clickable pills via DOM post-processing.
+ * Convert <webcite> tags to markdown links.
  */
 export function transformCitations(text: string): string {
-	return text.replace(CITE_RE, (_match, doc: string, page: string, section: string | undefined, quoted: string) => {
+	let result = text.replace(CITE_RE, (_match, doc: string, page: string, section: string | undefined, quoted: string) => {
 		if (section) {
 			return `${quoted.trim()} [${doc}, ${section}, p.${page}]`;
 		}
 		return `${quoted.trim()} [${doc}, p.${page}]`;
 	});
+	result = result.replace(WEBCITE_RE, (_match, url: string, title: string, summary: string) => {
+		return `${summary.trim()} ([${title}](${url}))`;
+	});
+	return result;
 }
 
 /**
@@ -23,6 +29,7 @@ export function transformCitations(text: string): string {
 export function stripCiteTags(text: string): string {
 	let result = transformCitations(text);
 	result = result.replace(/<cite\s+[^>]*$/, "");
+	result = result.replace(/<webcite\s+[^>]*$/, "");
 	return result;
 }
 

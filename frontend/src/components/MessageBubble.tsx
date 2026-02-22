@@ -1,5 +1,5 @@
 import { motion } from "framer-motion";
-import { Bot, ChevronDown, ChevronUp, Search } from "lucide-react";
+import { Bot, ChevronDown, ChevronUp, Globe, Search } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { Streamdown } from "streamdown";
 import "streamdown/styles.css";
@@ -91,11 +91,27 @@ interface StreamingBubbleProps {
 	searchSteps?: string[];
 }
 
+function isWebStep(step: string): boolean {
+	return step.startsWith("Web search:") || step.includes("web results");
+}
+
+function isDocStep(step: string): boolean {
+	return step.startsWith("Searching:") || step.startsWith("Found") && step.includes("results across");
+}
+
 export function StreamingBubble({ content, statusMessage, searchSteps = [] }: StreamingBubbleProps) {
 	const [logExpanded, setLogExpanded] = useState(false);
 	const displayContent = content ? stripCiteTags(content) : "";
 	const hasSteps = searchSteps.length > 0;
 	const isSearching = statusMessage && !displayContent;
+	const isWebStatus = statusMessage ? isWebStep(statusMessage) : false;
+	const webStepCount = searchSteps.filter(isWebStep).length;
+	const docStepCount = searchSteps.filter(isDocStep).length;
+
+	const summaryParts = [
+		docStepCount > 0 ? `${docStepCount} doc search${docStepCount !== 1 ? "es" : ""}` : "",
+		webStepCount > 0 ? `${webStepCount} web search${webStepCount !== 1 ? "es" : ""}` : "",
+	].filter(Boolean);
 
 	return (
 		<div className="flex gap-3 py-1.5">
@@ -111,11 +127,15 @@ export function StreamingBubble({ content, statusMessage, searchSteps = [] }: St
 							onClick={() => setLogExpanded(!logExpanded)}
 							className="flex w-full items-center gap-1.5 px-2.5 py-1.5 text-left text-neutral-500 hover:bg-neutral-100"
 						>
-							<Search className={`h-3 w-3 flex-shrink-0 ${isSearching ? "animate-pulse text-blue-500" : "text-neutral-400"}`} />
+							{isSearching && isWebStatus ? (
+								<Globe className="h-3 w-3 flex-shrink-0 animate-pulse text-emerald-500" />
+							) : (
+								<Search className={`h-3 w-3 flex-shrink-0 ${isSearching ? "animate-pulse text-blue-500" : "text-neutral-400"}`} />
+							)}
 							<span className="flex-1">
 								{isSearching
 									? statusMessage
-									: `${searchSteps.length} search${searchSteps.length !== 1 ? "es" : ""} completed`}
+									: `${summaryParts.join(", ")} completed`}
 							</span>
 							{logExpanded ? (
 								<ChevronUp className="h-3 w-3 text-neutral-400" />
@@ -127,7 +147,13 @@ export function StreamingBubble({ content, statusMessage, searchSteps = [] }: St
 							<div className="border-t border-neutral-100 px-2.5 py-1.5">
 								{searchSteps.map((step, i) => (
 									<div key={`step-${i}`} className="flex items-start gap-1.5 py-0.5 text-neutral-500">
-										<span className="mt-0.5 h-1.5 w-1.5 flex-shrink-0 rounded-full bg-neutral-300" />
+										{isWebStep(step) ? (
+											<Globe className="mt-0.5 h-3 w-3 flex-shrink-0 text-emerald-400" />
+										) : isDocStep(step) ? (
+											<Search className="mt-0.5 h-3 w-3 flex-shrink-0 text-blue-300" />
+										) : (
+											<span className="mt-0.5 h-3 w-3 flex-shrink-0 rounded-full bg-neutral-200" />
+										)}
 										<span>{step}</span>
 									</div>
 								))}
