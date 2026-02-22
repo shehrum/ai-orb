@@ -3,7 +3,7 @@ import { Bot, ChevronDown, ChevronUp, Globe, Search } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { Streamdown } from "streamdown";
 import "streamdown/styles.css";
-import { hydrateCitationBadges, stripCiteTags, transformCitations } from "../lib/citation-parser";
+import { extractWebCiteUrls, hydrateCitationBadges, hydrateWebCitationBadges, stripCiteTags, transformCitations } from "../lib/citation-parser";
 import type { Message } from "../types";
 
 interface MessageBubbleProps {
@@ -14,18 +14,24 @@ interface MessageBubbleProps {
 export function MessageBubble({ message, onCitationClick }: MessageBubbleProps) {
 	const proseRef = useRef<HTMLDivElement>(null);
 
-	// After Streamdown renders, hydrate [Doc X, p.N] text into clickable pills
+	// Extract web citation URLs from raw content before transformation strips them
+	const webCiteUrls = message.role === "assistant" ? extractWebCiteUrls(message.content) : new Map<string, string>();
+
+	// After Streamdown renders, hydrate citation text into clickable pills
 	useEffect(() => {
-		if (!proseRef.current || !onCitationClick || message.role !== "assistant") return;
+		if (!proseRef.current || message.role !== "assistant") return;
 
 		// Small delay to let Streamdown finish rendering
 		const timer = setTimeout(() => {
 			if (proseRef.current) {
-				hydrateCitationBadges(proseRef.current, onCitationClick);
+				if (onCitationClick) {
+					hydrateCitationBadges(proseRef.current, onCitationClick);
+				}
+				hydrateWebCitationBadges(proseRef.current, webCiteUrls);
 			}
 		}, 100);
 		return () => clearTimeout(timer);
-	}, [message.content, message.role, onCitationClick]);
+	}, [message.content, message.role, onCitationClick, webCiteUrls]);
 
 	if (message.role === "system") {
 		return (
