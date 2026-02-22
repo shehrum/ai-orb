@@ -6,13 +6,23 @@ import uuid
 import fitz  # PyMuPDF
 import structlog
 from fastapi import UploadFile
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from takehome.config import settings
 from takehome.db.models import Document
 
 logger = structlog.get_logger()
+
+# Label sequence: "Doc A", "Doc B", ..., "Doc Z", "Doc AA", ...
+_LABELS = [chr(i) for i in range(ord("A"), ord("Z") + 1)]
+
+
+def _label_for_index(idx: int) -> str:
+    """Generate a document label for the given 0-based index."""
+    if idx < 26:
+        return f"Doc {_LABELS[idx]}"
+    return f"Doc {_LABELS[idx // 26 - 1]}{_LABELS[idx % 26]}"
 
 
 async def upload_document(
@@ -21,15 +31,9 @@ async def upload_document(
     """Upload and process a PDF document for a conversation.
 
     Validates the file is a PDF, saves it to disk, extracts text using PyMuPDF,
-    and stores metadata in the database.
-
-    Raises ValueError if the conversation already has a document or the file is not a PDF.
+    and stores metadata in the database. Multiple documents per conversation
+    are allowed; each gets a label like "Doc A", "Doc B", etc.
     """
-    # Check if conversation already has a document
-    existing = await get_document_for_conversation(session, conversation_id)
-    if existing is not None:
-        raise ValueError("Conversation already has a document. Only one document per conversation is allowed.")
-
     # Validate file type
     if file.content_type not in ("application/pdf", "application/x-pdf"):
         filename = file.filename or ""
@@ -84,6 +88,12 @@ async def upload_document(
         text_length=len(extracted_text),
     )
 
+    # Determine label: count existing documents in this conversation
+    count_stmt = select(func.count()).where(Document.conversation_id == conversation_id)
+    result = await session.execute(count_stmt)
+    existing_count = result.scalar() or 0
+    label = _label_for_index(existing_count)
+
     # Create the document record
     document = Document(
         conversation_id=conversation_id,
@@ -91,10 +101,22 @@ async def upload_document(
         file_path=file_path,
         extracted_text=extracted_text if extracted_text else None,
         page_count=page_count,
+        label=label,
     )
     session.add(document)
     await session.commit()
     await session.refresh(document)
+
+    # Trigger RAG processing (chunk + embed) in the background
+    try:
+        from takehome.services.rag import process_document
+
+        await process_document(session, document)
+        logger.info("RAG processing complete", document_id=document.id, label=label)
+    except Exception:
+        logger.exception("RAG processing failed", document_id=document.id)
+        # Document is still usable even if RAG fails
+
     return document
 
 
@@ -108,7 +130,20 @@ async def get_document(session: AsyncSession, document_id: str) -> Document | No
 async def get_document_for_conversation(
     session: AsyncSession, conversation_id: str
 ) -> Document | None:
-    """Get the document for a conversation, if one exists."""
+    """Get the first document for a conversation, if one exists."""
     stmt = select(Document).where(Document.conversation_id == conversation_id)
     result = await session.execute(stmt)
-    return result.scalar_one_or_none()
+    return result.scalars().first()
+
+
+async def get_documents_for_conversation(
+    session: AsyncSession, conversation_id: str
+) -> list[Document]:
+    """Get all documents for a conversation, ordered by upload time."""
+    stmt = (
+        select(Document)
+        .where(Document.conversation_id == conversation_id)
+        .order_by(Document.uploaded_at.asc())
+    )
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
