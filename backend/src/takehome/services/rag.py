@@ -52,19 +52,6 @@ CHUNK_OVERLAP_TOKENS = 50
 # Page boundary marker produced by document.py during extraction
 PAGE_MARKER_RE = re.compile(r"^--- Page (\d+) ---$", re.MULTILINE)
 
-# Common legal section headers
-SECTION_HEADER_RE = re.compile(
-    r"^(?:"
-    r"\d+(?:\.\d+)*\.?\s+"  # numbered sections like "1.2 Definitions"
-    r"|ARTICLE\s+[IVXLCDM\d]+"  # ARTICLE I, II, etc.
-    r"|SECTION\s+\d+"  # SECTION 1, 2, etc.
-    r"|SCHEDULE\s+\d+"  # SCHEDULE 1, 2, etc.
-    r"|EXHIBIT\s+[A-Z]"  # EXHIBIT A, B, etc.
-    r"|PART\s+\d+"  # PART 1, 2, etc.
-    r")",
-    re.MULTILINE | re.IGNORECASE,
-)
-
 
 @dataclass
 class ChunkInfo:
@@ -118,8 +105,6 @@ def chunk_document(extracted_text: str) -> list[ChunkInfo]:
     encoder = _get_encoder()
 
     for page_num, page_text in pages:
-        # Try to detect section headers within the page
-        current_section: str | None = None
         paragraphs = page_text.split("\n\n")
 
         current_chunk_parts: list[str] = []
@@ -130,13 +115,6 @@ def chunk_document(extracted_text: str) -> list[ChunkInfo]:
             if not para:
                 continue
 
-            # Check for section header
-            header_match = SECTION_HEADER_RE.match(para)
-            if header_match:
-                # Extract just the first line as header
-                first_line = para.split("\n")[0].strip()
-                current_section = first_line[:100]
-
             para_tokens = len(encoder.encode(para))
 
             # If adding this paragraph would exceed target, flush current chunk
@@ -146,7 +124,7 @@ def chunk_document(extracted_text: str) -> list[ChunkInfo]:
                     ChunkInfo(
                         content=chunk_text,
                         page_number=page_num,
-                        section_header=current_section,
+                        section_header=None,
                         token_count=current_tokens,
                     )
                 )
@@ -169,7 +147,7 @@ def chunk_document(extracted_text: str) -> list[ChunkInfo]:
                 ChunkInfo(
                     content=chunk_text,
                     page_number=page_num,
-                    section_header=current_section,
+                    section_header=None,
                     token_count=current_tokens,
                 )
             )
@@ -182,13 +160,21 @@ def chunk_document(extracted_text: str) -> list[ChunkInfo]:
 # ---------------------------------------------------------------------------
 
 
+@dataclass
+class ChunkMetadata:
+    context: str
+    section: str | None
+
+
 async def generate_chunk_contexts(
     document_text: str, chunks: list[ChunkInfo]
-) -> list[str]:
-    """Use Claude Haiku to generate context for each chunk (Anthropic Contextual Retrieval).
+) -> list[ChunkMetadata]:
+    """Use Claude Haiku to generate context and identify section/clause for each chunk.
 
-    Returns a list of context strings, one per chunk.
+    Returns a list of ChunkMetadata (context string + section identifier), one per chunk.
     """
+    import json as _json
+
     import anthropic
 
     client = anthropic.AsyncAnthropic()
@@ -199,7 +185,7 @@ async def generate_chunk_contexts(
     if len(document_text) > max_doc_chars:
         doc_summary += "\n\n[... document truncated for context generation ...]"
 
-    contexts: list[str] = []
+    results: list[ChunkMetadata] = []
 
     for chunk in chunks:
         prompt = (
@@ -210,25 +196,49 @@ async def generate_chunk_contexts(
             "<chunk>\n"
             f"{chunk.content}\n"
             "</chunk>\n\n"
-            "Please give a short succinct context (2-3 sentences) to situate this chunk "
+            "Return a JSON object with exactly two fields:\n"
+            "1. \"context\": A short succinct context (2-3 sentences) to situate this chunk "
             "within the overall document for the purposes of improving search retrieval. "
             "If this is a legal document, mention the document type, relevant section/clause, "
-            "parties involved, and any defined terms. Answer only with the context, nothing else."
+            "parties involved, and any defined terms.\n"
+            "2. \"section\": The specific section, clause, or article identifier this chunk falls under "
+            "(e.g. \"Section 3 — Rent\", \"4.1 Tenant's Obligations\", \"Clause 7.2\", "
+            "\"Executive Summary\"). Use the exact heading from the document. "
+            "If no clear section applies, use null.\n\n"
+            "Return ONLY the JSON object, no other text."
         )
 
         try:
             response = await client.messages.create(
                 model="claude-haiku-4-5-20251001",
-                max_tokens=200,
+                max_tokens=300,
                 messages=[{"role": "user", "content": prompt}],
             )
-            context = response.content[0].text  # type: ignore[union-attr]
-            contexts.append(context)
+            raw = response.content[0].text.strip()  # type: ignore[union-attr]
+
+            # Strip markdown code fences if present
+            if raw.startswith("```"):
+                raw = re.sub(r"^```(?:json)?\s*", "", raw)
+                raw = re.sub(r"\s*```$", "", raw)
+
+            # Parse JSON response
+            try:
+                parsed = _json.loads(raw)
+                context = parsed.get("context", "")
+                section = parsed.get("section")
+                # Normalize null/empty section
+                if not section or section == "null":
+                    section = None
+                results.append(ChunkMetadata(context=context, section=section))
+            except _json.JSONDecodeError:
+                # Fallback: treat entire response as context
+                logger.warning("Failed to parse JSON from Haiku, using raw text", page=chunk.page_number)
+                results.append(ChunkMetadata(context=raw, section=None))
         except Exception:
             logger.exception("Failed to generate context for chunk", page=chunk.page_number)
-            contexts.append("")
+            results.append(ChunkMetadata(context="", section=None))
 
-    return contexts
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -272,14 +282,14 @@ async def process_document(session: AsyncSession, document: Document) -> list[Do
         return []
     logger.info("Chunked document", document_id=document.id, num_chunks=len(chunks))
 
-    # 2. Contextual retrieval — generate context per chunk
-    contexts = await generate_chunk_contexts(document.extracted_text, chunks)
+    # 2. Contextual retrieval — generate context + section per chunk (via Haiku)
+    metadata = await generate_chunk_contexts(document.extracted_text, chunks)
 
     # 3. Prepare contextualized texts for embedding
     texts_to_embed = []
-    for chunk, ctx in zip(chunks, contexts):
-        if ctx:
-            texts_to_embed.append(f"{ctx}\n\n{chunk.content}")
+    for chunk, meta in zip(chunks, metadata):
+        if meta.context:
+            texts_to_embed.append(f"{meta.context}\n\n{chunk.content}")
         else:
             texts_to_embed.append(chunk.content)
 
@@ -289,15 +299,15 @@ async def process_document(session: AsyncSession, document: Document) -> list[Do
 
     # 5. Store
     db_chunks: list[DocumentChunk] = []
-    for i, (chunk, ctx, emb) in enumerate(zip(chunks, contexts, embeddings)):
+    for i, (chunk, meta, emb) in enumerate(zip(chunks, metadata, embeddings)):
         db_chunk = DocumentChunk(
             id=uuid.uuid4().hex[:16],
             document_id=document.id,
             chunk_index=i,
             content=chunk.content,
-            context_text=ctx if ctx else None,
+            context_text=meta.context if meta.context else None,
             page_number=chunk.page_number,
-            section_header=chunk.section_header,
+            section_header=meta.section,
             embedding=emb,
             token_count=chunk.token_count,
         )

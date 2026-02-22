@@ -28,6 +28,7 @@ export interface Citation {
 	doc_label: string;
 	doc_id?: string;
 	page: number;
+	section?: string;
 	text: string;
 }
 

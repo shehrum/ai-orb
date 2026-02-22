@@ -185,7 +185,12 @@ async def send_message(
 
         # Build citation data for the frontend
         citation_data = [
-            {"doc_label": c.doc_label, "page": c.page, "text": c.text}
+            {
+                "doc_label": c.doc_label,
+                "page": c.page,
+                "section": c.section,
+                "text": c.text,
+            }
             for c in citations
         ]
 

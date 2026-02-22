@@ -36,6 +36,7 @@ class Citation:
     doc_label: str
     page: int
     text: str
+    section: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -80,13 +81,15 @@ Use it to find relevant passages before answering questions.
 
 ## Citation format
 When referencing information from documents, you MUST use this exact citation format:
-<cite doc="DOC_LABEL" page="PAGE_NUMBER">exact or close quote from the document</cite>
+<cite doc="DOC_LABEL" page="PAGE_NUMBER" section="SECTION_OR_CLAUSE">exact or close quote from the document</cite>
 
 For example:
-<cite doc="Doc A" page="3">The tenant shall maintain insurance coverage</cite>
+<cite doc="Doc A" page="3" section="Section 1 — Definitions">The Term means a period of fifteen years</cite>
+<cite doc="Doc A" page="4" section="3.2 Rent Review">the rent payable shall be reviewed</cite>
 
 Rules for citations:
 - Always include the doc label and page number
+- Include the section or clause name/number when available from the search results
 - The quoted text should be a direct or close paraphrase from the source
 - Use multiple citations when drawing from multiple sources
 - Every factual claim from a document should have a citation
@@ -204,7 +207,7 @@ async def chat_with_documents(
 # ---------------------------------------------------------------------------
 
 CITE_RE = re.compile(
-    r'<cite\s+doc="([^"]+)"\s+page="(\d+)"\s*>(.*?)</cite>',
+    r'<cite\s+doc="([^"]+)"\s+page="(\d+)"(?:\s+section="([^"]*)")?\s*>(.*?)</cite>',
     re.DOTALL,
 )
 
@@ -217,7 +220,8 @@ def extract_citations(response: str) -> list[Citation]:
             Citation(
                 doc_label=match.group(1),
                 page=int(match.group(2)),
-                text=match.group(3).strip(),
+                section=match.group(3) if match.group(3) else None,
+                text=match.group(4).strip(),
             )
         )
     return citations
@@ -228,7 +232,10 @@ def strip_cite_tags(text: str) -> str:
     def _replace(m: re.Match[str]) -> str:
         doc = m.group(1)
         page = m.group(2)
-        quoted = m.group(3).strip()
+        section = m.group(3)
+        quoted = m.group(4).strip()
+        if section:
+            return f'{quoted} [{doc}, {section}, p.{page}]'
         return f'{quoted} [{doc}, p.{page}]'
 
     return CITE_RE.sub(_replace, text)
