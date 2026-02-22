@@ -22,6 +22,14 @@ dependencies = [
     "pydantic-ai-slim[anthropic]>=0.0.39",
     # Document extraction
     "pymupdf>=1.25.0",
+    # Embeddings
+    "openai>=1.0.0",
+    # Vector store
+    "pgvector>=0.3.0",
+    # BM25 keyword search
+    "rank-bm25>=0.2.2",
+    # Token counting
+    "tiktoken>=0.7.0",
     # HTTP client
     "httpx>=0.27.0",
     # Settings
