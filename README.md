@@ -32,6 +32,8 @@ ANTHROPIC_API_KEY=your_key_here
 ```
    We've provided an API key in the task email. You can also use your own.
 
+OPENAI_API_KEY=your_key_here
+
 4. Start everything:
 ```
 just dev
