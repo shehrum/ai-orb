@@ -72,10 +72,14 @@ export async function sendMessage(
 export async function uploadDocument(
 	conversationId: string,
 	file: File,
+	ocr = false,
 ): Promise<Document> {
 	const formData = new FormData();
 	formData.append("file", file);
-	const res = await fetch(`${BASE}/conversations/${conversationId}/documents`, {
+	const url = ocr
+		? `${BASE}/conversations/${conversationId}/documents?ocr=true`
+		: `${BASE}/conversations/${conversationId}/documents`;
+	const res = await fetch(url, {
 		method: "POST",
 		body: formData,
 	});

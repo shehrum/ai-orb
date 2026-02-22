@@ -19,7 +19,7 @@ interface ChatWindowProps {
 	conversationId: string | null;
 	uploadTasks: UploadTask[];
 	onSend: (content: string) => void;
-	onUpload: (files: File[]) => void;
+	onUpload: (files: File[], ocr: boolean) => void;
 	onCitationClick?: (docLabel: string, page: number) => void;
 	onDismissUpload: () => void;
 }

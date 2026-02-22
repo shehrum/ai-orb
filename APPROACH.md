@@ -10,15 +10,17 @@ A static retrieve-then-generate pipeline retrieves once and hopes for the best. 
 
 ### Ingestion Pipeline
 
-When a PDF is uploaded, it goes through four stages:
+When a PDF is uploaded, it goes through five stages:
 
-1. **Chunking** — Text is split at page boundaries, then within pages at paragraph breaks, targeting ~500 tokens per chunk with 50-token overlap. Page numbers are preserved as metadata.
+1. **Text Extraction** — PyMuPDF extracts text from digital PDFs. For scanned or photographed documents, the user toggles "Scanned docs" mode in the UI, which routes pages through Claude Haiku's vision model instead — each page is rendered as a PNG at 2x resolution and sent to Haiku for transcription. This handles handwritten annotations, complex tables, and degraded scan quality that traditional OCR (Tesseract, etc.) struggles with, at roughly $0.001 per page.
 
-2. **Contextual Retrieval + Section Identification** — Each chunk is sent to Claude Haiku alongside the full document. In a single call, Haiku returns a structured JSON with two fields: a 2-3 sentence context blurb (document type, parties, defined terms) and the section/clause identifier the chunk falls under. The context is prepended to the chunk before embedding, reducing retrieval failures by 49% per Anthropic's benchmarks. Using the LLM for section identification proved far more robust than regex-based detection — it correctly handles diverse formats across document types (e.g. "Section 3 — Rent", "4.1 Tenant's Obligations", "Executive Summary", "Restrictive Covenants") without brittle pattern matching.
+2. **Chunking** — Text is split at page boundaries, then within pages at paragraph breaks, targeting ~500 tokens per chunk with 50-token overlap. Page numbers are preserved as metadata.
 
-3. **Embedding** — Contextualized chunks are embedded using OpenAI `text-embedding-3-small` (1536 dimensions), chosen for its speed and cost at this scale.
+3. **Contextual Retrieval + Section Identification** — Each chunk is sent to Claude Haiku alongside the full document. In a single call, Haiku returns a structured JSON with two fields: a 2-3 sentence context blurb (document type, parties, defined terms) and the section/clause identifier the chunk falls under. The context is prepended to the chunk before embedding, reducing retrieval failures by 49% per Anthropic's benchmarks. Using the LLM for section identification proved far more robust than regex-based detection — it correctly handles diverse formats across document types (e.g. "Section 3 — Rent", "4.1 Tenant's Obligations", "Executive Summary", "Restrictive Covenants") without brittle pattern matching.
 
-4. **Storage** — Chunks, context, embeddings, and metadata (page number, section/clause) are stored in PostgreSQL with pgvector.
+4. **Embedding** — Contextualized chunks are embedded using OpenAI `text-embedding-3-small` (1536 dimensions), chosen for its speed and cost at this scale.
+
+5. **Storage** — Chunks, context, embeddings, and metadata (page number, section/clause) are stored in PostgreSQL with pgvector.
 
 ### Hybrid Search
 
@@ -48,7 +50,9 @@ The backend extracts these into structured `Citation` objects. The frontend stri
 
 - **PostgreSQL (pgvector) over a dedicated vector DB** — uses the existing Postgres instance, avoids infrastructure complexity, and pgvector's HNSW index is performant at this document scale.
 
-- **Sonnet for chat, Haiku for context generation** — Sonnet provides better legal reasoning and tool-use decisions; Haiku is sufficient for the mechanical task of context + section identification, at 1/10th the cost.
+- **Sonnet for chat, Haiku for context generation and OCR** — Sonnet provides better legal reasoning and tool-use decisions; Haiku is sufficient for context + section identification and scanned document OCR, at 1/10th the cost.
+
+- **Vision OCR over traditional OCR** — Tesseract and similar engines struggle with complex legal layouts (multi-column, tables, handwritten marginalia). Claude Haiku's vision model understands document structure and produces clean, well-formatted text. The user explicitly opts in via a UI toggle rather than auto-detection, keeping the upload flow predictable.
 
 ### Evaluation
 

@@ -50,16 +50,14 @@ export function useDocuments(conversationId: string | null) {
 	}, []);
 
 	const uploadSingleFile = useCallback(
-		async (file: File, taskId: string) => {
+		async (file: File, taskId: string, ocr: boolean) => {
 			if (!conversationId) return null;
 			try {
-				updateTask(taskId, { status: "uploading" });
-				const doc = await api.uploadDocument(conversationId, file);
-				// Upload done, now it's processing (RAG pipeline runs server-side)
+				updateTask(taskId, { status: ocr ? "processing" : "uploading" });
+				const doc = await api.uploadDocument(conversationId, file, ocr);
 				updateTask(taskId, { status: "processing" });
 				setDocuments((prev) => [...prev, doc]);
 				setActiveDocumentId(doc.id);
-				// Mark done after a brief delay (processing happens server-side during upload)
 				updateTask(taskId, { status: "done" });
 				return doc;
 			} catch (err) {
@@ -74,10 +72,9 @@ export function useDocuments(conversationId: string | null) {
 	);
 
 	const uploadFiles = useCallback(
-		async (files: File[]) => {
+		async (files: File[], ocr = false) => {
 			if (!conversationId || files.length === 0) return;
 
-			// Create task entries for all files
 			const tasks: UploadTask[] = files.map((f, i) => ({
 				id: `upload-${Date.now()}-${i}`,
 				filename: f.name,
@@ -86,18 +83,16 @@ export function useDocuments(conversationId: string | null) {
 			setUploadTasks(tasks);
 			setError(null);
 
-			// Upload sequentially (server processes each one)
 			for (let i = 0; i < files.length; i++) {
-				await uploadSingleFile(files[i], tasks[i].id);
+				await uploadSingleFile(files[i], tasks[i].id, ocr);
 			}
 		},
 		[conversationId, uploadSingleFile],
 	);
 
-	// Legacy single-file upload (kept for compatibility)
 	const upload = useCallback(
-		async (file: File) => {
-			await uploadFiles([file]);
+		async (file: File, ocr = false) => {
+			await uploadFiles([file], ocr);
 		},
 		[uploadFiles],
 	);

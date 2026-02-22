@@ -52,8 +52,8 @@ export default function App() {
 	);
 
 	const handleUpload = useCallback(
-		async (files: File[]) => {
-			await uploadFiles(files);
+		async (files: File[], ocr: boolean) => {
+			await uploadFiles(files, ocr);
 			refreshDocuments();
 			refreshConversations();
 		},

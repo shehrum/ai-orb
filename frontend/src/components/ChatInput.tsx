@@ -1,11 +1,11 @@
-import { Paperclip, SendHorizontal } from "lucide-react";
+import { Paperclip, ScanLine, SendHorizontal } from "lucide-react";
 import { type KeyboardEvent, useCallback, useRef, useState } from "react";
 import { Button } from "./ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 
 interface ChatInputProps {
 	onSend: (content: string) => void;
-	onUpload: (files: File[]) => void;
+	onUpload: (files: File[], ocr: boolean) => void;
 	disabled: boolean;
 }
 
@@ -15,6 +15,7 @@ export function ChatInput({
 	disabled,
 }: ChatInputProps) {
 	const [value, setValue] = useState("");
+	const [ocrMode, setOcrMode] = useState(false);
 	const textareaRef = useRef<HTMLTextAreaElement>(null);
 	const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -49,13 +50,13 @@ export function ChatInput({
 		(e: React.ChangeEvent<HTMLInputElement>) => {
 			const files = Array.from(e.target.files ?? []);
 			if (files.length > 0) {
-				onUpload(files);
+				onUpload(files, ocrMode);
 			}
 			if (fileInputRef.current) {
 				fileInputRef.current.value = "";
 			}
 		},
-		[onUpload],
+		[onUpload, ocrMode],
 	);
 
 	return (
@@ -75,6 +76,24 @@ export function ChatInput({
 						</div>
 					</TooltipTrigger>
 					<TooltipContent>Upload PDF documents</TooltipContent>
+				</Tooltip>
+
+				<Tooltip>
+					<TooltipTrigger asChild>
+						<div>
+							<Button
+								variant="ghost"
+								size="icon"
+								className={`h-8 w-8 flex-shrink-0 ${ocrMode ? "bg-amber-100" : ""}`}
+								onClick={() => setOcrMode(!ocrMode)}
+							>
+								<ScanLine className={`h-4 w-4 ${ocrMode ? "text-amber-600" : "text-neutral-400"}`} />
+							</Button>
+						</div>
+					</TooltipTrigger>
+					<TooltipContent>
+						{ocrMode ? "OCR mode ON — for scanned docs" : "OCR mode OFF — click for scanned docs"}
+					</TooltipContent>
 				</Tooltip>
 
 				<input

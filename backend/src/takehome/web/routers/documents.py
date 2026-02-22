@@ -47,11 +47,13 @@ class DocumentOut(BaseModel):
 async def upload_document_endpoint(
     conversation_id: str,
     file: UploadFile,
+    ocr: bool = False,
     session: AsyncSession = Depends(get_session),
 ) -> DocumentOut:
     """Upload a PDF document for a conversation.
 
     Multiple documents per conversation are supported.
+    Set ocr=true for scanned documents that need Vision OCR.
     """
     # Verify the conversation exists
     conversation = await get_conversation(session, conversation_id)
@@ -59,7 +61,7 @@ async def upload_document_endpoint(
         raise HTTPException(status_code=404, detail="Conversation not found")
 
     try:
-        document = await upload_document(session, conversation_id, file)
+        document = await upload_document(session, conversation_id, file, use_ocr=ocr)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 

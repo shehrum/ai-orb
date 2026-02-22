@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import base64
 import os
 import uuid
 
+import anthropic
 import fitz  # PyMuPDF
 import structlog
 from fastapi import UploadFile
@@ -25,14 +27,91 @@ def _label_for_index(idx: int) -> str:
     return f"Doc {_LABELS[idx // 26 - 1]}{_LABELS[idx % 26]}"
 
 
+def _extract_text_pymupdf(file_path: str) -> tuple[str, int]:
+    """Extract text using PyMuPDF. Returns (text, page_count)."""
+    try:
+        doc = fitz.open(file_path)
+        page_count = len(doc)
+        pages: list[str] = []
+        for page_num in range(page_count):
+            page = doc[page_num]
+            text = page.get_text()  # type: ignore[union-attr]
+            if text.strip():
+                pages.append(f"--- Page {page_num + 1} ---\n{text}")
+        doc.close()
+        return "\n\n".join(pages), page_count
+    except Exception:
+        logger.exception("Failed to extract text from PDF", path=file_path)
+        return "", 0
+
+
+async def _ocr_with_vision(file_path: str) -> tuple[str, int]:
+    """OCR a scanned PDF using Claude Haiku vision.
+
+    Renders each page as an image and sends it to Claude for transcription.
+    Returns (text, page_count).
+    """
+    client = anthropic.AsyncAnthropic()
+    doc = fitz.open(file_path)
+    page_count = len(doc)
+    pages: list[str] = []
+
+    for page_num in range(page_count):
+        page = doc[page_num]
+
+        # Render page to PNG at 2x resolution for quality
+        mat = fitz.Matrix(2, 2)
+        pix = page.get_pixmap(matrix=mat)  # type: ignore[union-attr]
+        img_bytes = pix.tobytes("png")
+        img_b64 = base64.b64encode(img_bytes).decode("utf-8")
+
+        try:
+            response = await client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=4096,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": "image/png",
+                                    "data": img_b64,
+                                },
+                            },
+                            {
+                                "type": "text",
+                                "text": (
+                                    "Transcribe all the text on this page of a legal document. "
+                                    "Preserve the structure: section headings, clause numbers, "
+                                    "paragraph breaks, tables, and any handwritten annotations. "
+                                    "Return only the transcribed text, nothing else."
+                                ),
+                            },
+                        ],
+                    }
+                ],
+            )
+            page_text = response.content[0].text  # type: ignore[union-attr]
+            pages.append(f"--- Page {page_num + 1} ---\n{page_text}")
+            logger.info("OCR completed for page", page=page_num + 1, chars=len(page_text))
+        except Exception:
+            logger.exception("OCR failed for page", page=page_num + 1)
+            pages.append(f"--- Page {page_num + 1} ---\n[OCR failed for this page]")
+
+    doc.close()
+    return "\n\n".join(pages), page_count
+
+
 async def upload_document(
-    session: AsyncSession, conversation_id: str, file: UploadFile
+    session: AsyncSession, conversation_id: str, file: UploadFile, *, use_ocr: bool = False
 ) -> Document:
     """Upload and process a PDF document for a conversation.
 
-    Validates the file is a PDF, saves it to disk, extracts text using PyMuPDF,
-    and stores metadata in the database. Multiple documents per conversation
-    are allowed; each gets a label like "Doc A", "Doc B", etc.
+    When use_ocr=True, pages are rendered as images and sent to Claude Haiku
+    vision for transcription (for scanned/photographed documents).
     """
     # Validate file type
     if file.content_type not in ("application/pdf", "application/x-pdf"):
@@ -63,29 +142,19 @@ async def upload_document(
 
     logger.info("Saved uploaded PDF", filename=original_filename, path=file_path, size=len(content))
 
-    # Extract text using PyMuPDF
-    extracted_text = ""
-    page_count = 0
-    try:
-        doc = fitz.open(file_path)
-        page_count = len(doc)
-        pages: list[str] = []
-        for page_num in range(page_count):
-            page = doc[page_num]
-            text = page.get_text()  # type: ignore[union-attr]
-            if text.strip():
-                pages.append(f"--- Page {page_num + 1} ---\n{text}")
-        extracted_text = "\n\n".join(pages)
-        doc.close()
-    except Exception:
-        logger.exception("Failed to extract text from PDF", filename=original_filename)
-        extracted_text = ""
+    # Extract text
+    if use_ocr:
+        logger.info("Using Vision OCR for scanned document", filename=original_filename)
+        extracted_text, page_count = await _ocr_with_vision(file_path)
+    else:
+        extracted_text, page_count = _extract_text_pymupdf(file_path)
 
     logger.info(
-        "Extracted text from PDF",
+        "Text extraction complete",
         filename=original_filename,
         page_count=page_count,
         text_length=len(extracted_text),
+        method="ocr" if use_ocr else "pymupdf",
     )
 
     # Determine label: count existing documents in this conversation
@@ -107,7 +176,7 @@ async def upload_document(
     await session.commit()
     await session.refresh(document)
 
-    # Trigger RAG processing (chunk + embed) in the background
+    # Trigger RAG processing (chunk + embed)
     try:
         from takehome.services.rag import process_document
 
@@ -115,7 +184,6 @@ async def upload_document(
         logger.info("RAG processing complete", document_id=document.id, label=label)
     except Exception:
         logger.exception("RAG processing failed", document_id=document.id)
-        # Document is still usable even if RAG fails
 
     return document
 
