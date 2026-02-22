@@ -14,8 +14,14 @@ from starlette.responses import StreamingResponse
 from takehome.db.models import Message
 from takehome.db.session import get_session
 from takehome.services.conversation import get_conversation, update_conversation
-from takehome.services.document import get_document_for_conversation
-from takehome.services.llm import chat_with_document, count_sources_cited, generate_title
+from takehome.services.document import get_documents_for_conversation
+from takehome.services.llm import (
+    ChatDeps,
+    chat_with_documents,
+    count_sources_cited,
+    extract_citations,
+    generate_title,
+)
 
 logger = structlog.get_logger()
 
@@ -106,11 +112,11 @@ async def send_message(
 
     logger.info("User message saved", conversation_id=conversation_id, message_id=user_message.id)
 
-    # Load document text for the conversation
-    document = await get_document_for_conversation(session, conversation_id)
-    document_text: str | None = document.extracted_text if document else None
+    # Check if conversation has documents (for status messaging)
+    documents = await get_documents_for_conversation(session, conversation_id)
+    has_documents = len(documents) > 0
 
-    # Load conversation history (exclude the message we just saved, it will be the user_message param)
+    # Load conversation history (exclude the message we just saved)
     stmt = (
         select(Message)
         .where(Message.conversation_id == conversation_id)
@@ -132,15 +138,36 @@ async def send_message(
         """Generate SSE events with the streamed LLM response."""
         full_response = ""
 
+        # Send status event if we have documents (agent will search)
+        if has_documents:
+            status_data = json.dumps({"type": "status", "content": "Searching documents..."})
+            yield f"data: {status_data}\n\n"
+
         try:
-            async for chunk in chat_with_document(
-                user_message=body.content,
-                document_text=document_text,
-                conversation_history=conversation_history,
-            ):
-                full_response += chunk
-                event_data = json.dumps({"type": "content", "content": chunk})
-                yield f"data: {event_data}\n\n"
+            # Use a fresh session for the agentic pipeline
+            from takehome.db.session import async_session as session_factory
+
+            async with session_factory() as agent_session:
+                deps = ChatDeps(
+                    conversation_id=conversation_id,
+                    session=agent_session,
+                )
+
+                async for chunk in chat_with_documents(
+                    user_message=body.content,
+                    conversation_history=conversation_history,
+                    deps=deps,
+                ):
+                    # Check for status markers from tool calls
+                    if chunk.startswith("__STATUS__:"):
+                        status_msg = chunk[len("__STATUS__:"):]
+                        event_data = json.dumps({"type": "status", "content": status_msg})
+                        yield f"data: {event_data}\n\n"
+                        continue
+
+                    full_response += chunk
+                    event_data = json.dumps({"type": "content", "content": chunk})
+                    yield f"data: {event_data}\n\n"
 
         except Exception:
             logger.exception(
@@ -152,11 +179,23 @@ async def send_message(
             event_data = json.dumps({"type": "content", "content": error_msg})
             yield f"data: {event_data}\n\n"
 
-        # Count sources cited in the full response
+        # Extract citations from the full response
+        citations = extract_citations(full_response)
         sources = count_sources_cited(full_response)
 
-        # Save the assistant message to the database.
-        # We need a fresh session since the outer one may have been closed.
+        # Build citation data for the frontend
+        citation_data = [
+            {"doc_label": c.doc_label, "page": c.page, "text": c.text}
+            for c in citations
+        ]
+
+        # Map doc labels to doc IDs for the frontend
+        doc_label_map: dict[str, str] = {}
+        for doc in documents:
+            if doc.label:
+                doc_label_map[doc.label] = doc.id
+
+        # Save the assistant message to the database
         from takehome.db.session import async_session as session_factory
 
         async with session_factory() as save_session:
@@ -202,12 +241,14 @@ async def send_message(
             )
             yield f"data: {message_data}\n\n"
 
-            # Send the done signal
+            # Send the done signal with citation data
             done_data = json.dumps(
                 {
                     "type": "done",
                     "sources_cited": sources,
                     "message_id": assistant_message.id,
+                    "citations": citation_data,
+                    "doc_label_map": doc_label_map,
                 }
             )
             yield f"data: {done_data}\n\n"

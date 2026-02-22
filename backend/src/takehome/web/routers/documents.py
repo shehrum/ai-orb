@@ -11,7 +11,7 @@ from starlette.responses import FileResponse
 
 from takehome.db.session import get_session
 from takehome.services.conversation import get_conversation
-from takehome.services.document import get_document, upload_document
+from takehome.services.document import get_document, get_documents_for_conversation, upload_document
 
 logger = structlog.get_logger()
 
@@ -28,6 +28,7 @@ class DocumentOut(BaseModel):
     conversation_id: str
     filename: str
     page_count: int
+    label: str | None = None
     uploaded_at: datetime
 
     model_config = {"from_attributes": True}
@@ -50,8 +51,7 @@ async def upload_document_endpoint(
 ) -> DocumentOut:
     """Upload a PDF document for a conversation.
 
-    Only one document per conversation is allowed. Returns 409 if a document
-    already exists.
+    Multiple documents per conversation are supported.
     """
     # Verify the conversation exists
     conversation = await get_conversation(session, conversation_id)
@@ -61,16 +61,14 @@ async def upload_document_endpoint(
     try:
         document = await upload_document(session, conversation_id, file)
     except ValueError as e:
-        error_message = str(e)
-        if "already has a document" in error_message:
-            raise HTTPException(status_code=409, detail=error_message)
-        raise HTTPException(status_code=400, detail=error_message)
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
     logger.info(
         "Document uploaded",
         conversation_id=conversation_id,
         document_id=document.id,
         filename=document.filename,
+        label=document.label,
     )
 
     return DocumentOut(
@@ -78,8 +76,36 @@ async def upload_document_endpoint(
         conversation_id=document.conversation_id,
         filename=document.filename,
         page_count=document.page_count,
+        label=document.label,
         uploaded_at=document.uploaded_at,
     )
+
+
+@router.get(
+    "/api/conversations/{conversation_id}/documents",
+    response_model=list[DocumentOut],
+)
+async def list_documents_endpoint(
+    conversation_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> list[DocumentOut]:
+    """List all documents for a conversation."""
+    conversation = await get_conversation(session, conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    documents = await get_documents_for_conversation(session, conversation_id)
+    return [
+        DocumentOut(
+            id=doc.id,
+            conversation_id=doc.conversation_id,
+            filename=doc.filename,
+            page_count=doc.page_count,
+            label=doc.label,
+            uploaded_at=doc.uploaded_at,
+        )
+        for doc in documents
+    ]
 
 
 @router.get("/api/documents/{document_id}/content")
