@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import * as api from "../lib/api";
-import type { Message } from "../types";
+import type { Citation, Message } from "../types";
 
 export function useMessages(conversationId: string | null) {
 	const [messages, setMessages] = useState<Message[]>([]);
@@ -8,6 +8,10 @@ export function useMessages(conversationId: string | null) {
 	const [error, setError] = useState<string | null>(null);
 	const [streaming, setStreaming] = useState(false);
 	const [streamingContent, setStreamingContent] = useState("");
+	const [statusMessage, setStatusMessage] = useState<string | null>(null);
+	const [searchSteps, setSearchSteps] = useState<string[]>([]);
+	const [citations, setCitations] = useState<Citation[]>([]);
+	const [docLabelMap, setDocLabelMap] = useState<Record<string, string>>({});
 	const abortRef = useRef<AbortController | null>(null);
 
 	const refresh = useCallback(async () => {
@@ -52,6 +56,9 @@ export function useMessages(conversationId: string | null) {
 			setMessages((prev) => [...prev, userMessage]);
 			setStreaming(true);
 			setStreamingContent("");
+			setStatusMessage(null);
+			setSearchSteps([]);
+			setCitations([]);
 			setError(null);
 
 			try {
@@ -72,7 +79,6 @@ export function useMessages(conversationId: string | null) {
 
 					buffer += decoder.decode(value, { stream: true });
 					const lines = buffer.split("\n");
-					// Keep the last potentially incomplete line in the buffer
 					buffer = lines.pop() ?? "";
 
 					for (const line of lines) {
@@ -88,20 +94,32 @@ export function useMessages(conversationId: string | null) {
 								content?: string;
 								delta?: string;
 								message?: Message;
+								citations?: Citation[];
+								doc_label_map?: Record<string, string>;
 							};
 
-							if (parsed.type === "delta" && parsed.delta) {
+							if (parsed.type === "status" && parsed.content) {
+								setStatusMessage(parsed.content);
+								setSearchSteps((prev) => [...prev, parsed.content as string]);
+							} else if (parsed.type === "delta" && parsed.delta) {
 								accumulated += parsed.delta;
 								setStreamingContent(accumulated);
+								setStatusMessage(null);
 							} else if (parsed.type === "content" && parsed.content) {
 								accumulated += parsed.content;
 								setStreamingContent(accumulated);
+								setStatusMessage(null);
 							} else if (parsed.type === "message" && parsed.message) {
-								// Final message from server
 								setMessages((prev) => [...prev, parsed.message as Message]);
 								accumulated = "";
+							} else if (parsed.type === "done") {
+								if (parsed.citations) {
+									setCitations(parsed.citations);
+								}
+								if (parsed.doc_label_map) {
+									setDocLabelMap(parsed.doc_label_map);
+								}
 							} else if (parsed.content && !parsed.type) {
-								// Fallback: plain content field
 								accumulated += parsed.content;
 								setStreamingContent(accumulated);
 							}
@@ -111,8 +129,6 @@ export function useMessages(conversationId: string | null) {
 					}
 				}
 
-				// If we accumulated content but never got a final message,
-				// create a synthetic assistant message
 				if (accumulated) {
 					const assistantMessage: Message = {
 						id: `stream-${Date.now()}`,
@@ -125,7 +141,6 @@ export function useMessages(conversationId: string | null) {
 					setMessages((prev) => [...prev, assistantMessage]);
 				}
 
-				// Refresh to get server-canonical messages
 				const freshMessages = await api.fetchMessages(conversationId);
 				setMessages(freshMessages);
 			} catch (err) {
@@ -134,6 +149,8 @@ export function useMessages(conversationId: string | null) {
 			} finally {
 				setStreaming(false);
 				setStreamingContent("");
+				setStatusMessage(null);
+				setSearchSteps([]);
 			}
 		},
 		[conversationId, streaming],
@@ -145,6 +162,10 @@ export function useMessages(conversationId: string | null) {
 		error,
 		streaming,
 		streamingContent,
+		statusMessage,
+		searchSteps,
+		citations,
+		docLabelMap,
 		send,
 		refresh,
 	};

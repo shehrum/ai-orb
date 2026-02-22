@@ -20,9 +20,17 @@ export interface Document {
 	conversation_id: string;
 	filename: string;
 	page_count: number;
+	label?: string;
 	uploaded_at: string;
 }
 
+export interface Citation {
+	doc_label: string;
+	doc_id?: string;
+	page: number;
+	text: string;
+}
+
 export interface ConversationDetail extends Conversation {
-	document?: Document;
+	documents: Document[];
 }
