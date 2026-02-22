@@ -4,7 +4,7 @@ import { ChatWindow } from "./components/ChatWindow";
 import { DocumentViewer } from "./components/DocumentViewer";
 import { TooltipProvider } from "./components/ui/tooltip";
 import { useConversations } from "./hooks/use-conversations";
-import { useDocument } from "./hooks/use-document";
+import { useDocuments } from "./hooks/use-documents";
 import { useMessages } from "./hooks/use-messages";
 
 export default function App() {
@@ -24,14 +24,24 @@ export default function App() {
 		error: messagesError,
 		streaming,
 		streamingContent,
+		statusMessage,
+		searchSteps,
+		docLabelMap,
 		send,
 	} = useMessages(selectedId);
 
 	const {
-		document,
-		upload,
-		refresh: refreshDocument,
-	} = useDocument(selectedId);
+		documents,
+		activeDocumentId,
+		targetPage,
+		uploadTasks,
+		uploadFiles,
+		refresh: refreshDocuments,
+		navigateTo,
+		clearTargetPage,
+		clearUploadTasks,
+		setActiveDocumentId,
+	} = useDocuments(selectedId);
 
 	const handleSend = useCallback(
 		async (content: string) => {
@@ -42,19 +52,32 @@ export default function App() {
 	);
 
 	const handleUpload = useCallback(
-		async (file: File) => {
-			const doc = await upload(file);
-			if (doc) {
-				refreshDocument();
-				refreshConversations();
-			}
+		async (files: File[]) => {
+			await uploadFiles(files);
+			refreshDocuments();
+			refreshConversations();
 		},
-		[upload, refreshDocument, refreshConversations],
+		[uploadFiles, refreshDocuments, refreshConversations],
 	);
 
 	const handleCreate = useCallback(async () => {
 		await create();
 	}, [create]);
+
+	const handleCitationClick = useCallback(
+		(docLabel: string, page: number) => {
+			const docId = docLabelMap[docLabel];
+			if (docId) {
+				navigateTo(docId, page);
+			} else {
+				const doc = documents.find((d) => d.label === docLabel);
+				if (doc) {
+					navigateTo(doc.id, page);
+				}
+			}
+		},
+		[docLabelMap, documents, navigateTo],
+	);
 
 	return (
 		<TooltipProvider delayDuration={200}>
@@ -74,13 +97,24 @@ export default function App() {
 					error={messagesError}
 					streaming={streaming}
 					streamingContent={streamingContent}
-					hasDocument={!!document}
+					statusMessage={statusMessage}
+					searchSteps={searchSteps}
+					hasDocuments={documents.length > 0}
 					conversationId={selectedId}
+					uploadTasks={uploadTasks}
 					onSend={handleSend}
 					onUpload={handleUpload}
+					onCitationClick={handleCitationClick}
+					onDismissUpload={clearUploadTasks}
 				/>
 
-				<DocumentViewer document={document} />
+				<DocumentViewer
+					documents={documents}
+					activeDocumentId={activeDocumentId}
+					onSelectDocument={setActiveDocumentId}
+					targetPage={targetPage}
+					onTargetPageHandled={clearTargetPage}
+				/>
 			</div>
 		</TooltipProvider>
 	);
