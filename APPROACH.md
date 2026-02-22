@@ -2,11 +2,13 @@
 
 ## Architecture
 
-The system is built around **agentic RAG with contextual retrieval** — Claude Sonnet is given a `search_documents` tool and autonomously decides when, what, and how many times to search. This replaces the original approach of dumping full document text into the prompt.
+The system is built around **agentic RAG with contextual retrieval** — Claude Sonnet is given a `search_documents` tool and a built-in `web_search` tool, and autonomously decides when, what, and how many times to search each. This replaces the original approach of dumping full document text into the prompt.
 
 ### Why Agentic Over Static RAG
 
 A static retrieve-then-generate pipeline retrieves once and hopes for the best. The agentic approach lets Claude reformulate queries, search multiple times with different terms, and cross-reference results across documents before answering. In practice, the agent makes 2-3 targeted searches per question — for example, searching "break clause period notice" then refining with "vacant possession material breach conditions." This mirrors how a lawyer would actually research across documents.
+
+For questions that require external context — current market rates, legal precedents, regulatory requirements, planning records — the agent uses Anthropic's built-in `web_search` tool. This runs server-side within the Anthropic API (no separate API key needed) and returns live web results that the agent cites using `<webcite>` tags with source URLs. The system prompt directs the agent to always try document search first, falling back to web search when uploaded documents don't contain the needed information.
 
 ### Ingestion Pipeline
 
@@ -34,19 +36,19 @@ This combination follows Anthropic's contextual retrieval research, which showed
 
 ### Citation Grounding
 
-The system prompt instructs Claude to produce `<cite doc="Doc A" page="3" section="Section 3 — Rent">quoted text</cite>` XML tags. This format was chosen because Claude produces XML tags reliably (more so than JSON or custom syntax), and it's straightforward to parse. Citations include document label, page number, and section/clause — all three dimensions a lawyer needs to locate the source.
+The system prompt instructs Claude to produce `<cite doc="Doc A" page="3" section="Section 3 — Rent">quoted text</cite>` XML tags for document references, and `<webcite url="..." title="...">summary</webcite>` tags for web references. This format was chosen because Claude produces XML tags reliably (more so than JSON or custom syntax), and it's straightforward to parse. Document citations include document label, page number, and section/clause — all three dimensions a lawyer needs to locate the source. Web citations include the source URL and page title.
 
-The backend extracts these into structured `Citation` objects. The frontend strips the XML during streaming (showing readable `[Doc A, Section 3, p.3]` text), then after rendering post-processes the DOM to hydrate those text badges into styled clickable pill elements. Clicking a citation pill navigates the document viewer to the correct document and page, with a highlight flash to draw attention.
+The backend extracts document citations into structured `Citation` objects. The frontend strips the XML during streaming (showing readable `[Doc A, Section 3, p.3]` text for documents, and markdown links for web sources), then after rendering post-processes the DOM to hydrate document badges into styled clickable pill elements. Clicking a citation pill navigates the document viewer to the correct document and page, with a highlight flash to draw attention. Web citation links open in the browser and are styled in green to visually distinguish them from document citations.
 
 ### Key Technical Decisions
 
-- **PydanticAI `agent.iter()`** over `run_stream()` — the streaming API only yields text from the first model turn, silently skipping tool execution. `iter()` properly steps through the full tool-call graph, and we stream the final response node's text.
+- **PydanticAI `agent.iter()`** over `run_stream()` — the streaming API only yields text from the first model turn, silently skipping tool execution. `iter()` properly steps through the full tool-call graph, and we stream the final response node's text. For builtin tools like web search (resolved server-side by Anthropic), we detect `builtin-tool-call` parts in the response and emit status events, while only treating `tool-call` parts (function tools) as requiring additional agent turns.
 
 - **LLM-based section detection over regex** — Early attempts used regex patterns to detect section headers during chunking (`Section \d+`, `ARTICLE [IVX]+`, etc.). This was fragile: it missed headers with em-dashes, over-matched on clause body text, and couldn't handle non-standard formats. Moving section identification into the existing Haiku contextual-retrieval call (one structured JSON response per chunk) solved this with zero additional API cost and handles any document format.
 
 - **DOM post-processing for citation pills** — Markdown renderers (Streamdown) sanitize custom URL protocols like `cite://`, showing `[blocked]`. Instead of fighting the sanitizer, citations render as plain `[Doc A, p.3]` text through the markdown pipeline, then a `useEffect` + TreeWalker hydrates them into styled `<span>` elements with click handlers. This completely bypasses sanitization concerns.
 
-- **Status events via asyncio.Queue** — the `search_documents` tool pushes status messages ("Searching: annual rent amount", "Found 10 results across Doc A, Doc B") into a queue that the SSE stream drains, giving the user real-time visibility into the agent's thinking via a collapsible activity log.
+- **Status events via asyncio.Queue** — the `search_documents` tool pushes status messages ("Searching: annual rent amount", "Found 10 results across Doc A, Doc B") into a queue that the SSE stream drains, giving the user real-time visibility into the agent's thinking via a collapsible activity log. Web search status is detected from builtin tool response parts and emitted the same way.
 
 - **PostgreSQL (pgvector) over a dedicated vector DB** — uses the existing Postgres instance, avoids infrastructure complexity, and pgvector's HNSW index is performant at this document scale.
 
@@ -56,4 +58,4 @@ The backend extracts these into structured `Citation` objects. The frontend stri
 
 ### Evaluation
 
-The eval suite (`test_rag_e2e.py`) tests across all synthetic documents and measures four metrics: retrieval recall (do we find the right documents?), MRR (is the right result ranked first?), tool-use effectiveness (does the agent search appropriately?), and citation grounding rate (do citations reference real pages in real documents?). Across 4 eval questions including cross-document analysis, the system scores 1.00 on all metrics — every citation is grounded, every expected document is retrieved, and the agent uses the search tool effectively with 2-3 calls per question.
+The eval suite (`evals/test_rag_e2e.py`) tests across all synthetic documents and measures four metrics: retrieval recall (do we find the right documents?), MRR (is the right result ranked first?), tool-use effectiveness (does the agent search appropriately?), and citation grounding rate (do citations reference real pages in real documents?). Across 4 eval questions including cross-document analysis, the system scores 1.00 on all metrics — every citation is grounded, every expected document is retrieved, and the agent uses the search tool effectively with 2-3 calls per question. Separate pytest tests in `backend/tests/test_web_search.py` verify that the web search builtin tool is wired correctly and emits proper status events.
