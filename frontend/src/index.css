@@ -115,6 +115,33 @@ body {
 	text-decoration: underline;
 }
 
+/* Citation pill styling */
+.citation-pill {
+	display: inline-flex;
+	align-items: center;
+	background-color: #eff6ff;
+	color: #1d4ed8;
+	text-decoration: none;
+	padding: 0.1em 0.5em;
+	border-radius: 9999px;
+	font-size: 0.7em;
+	font-weight: 600;
+	line-height: 1.6;
+	border: 1px solid #bfdbfe;
+	cursor: pointer;
+	transition: all 0.15s;
+	vertical-align: middle;
+	margin-left: 0.2em;
+	white-space: nowrap;
+	user-select: none;
+}
+
+.citation-pill:hover {
+	background-color: #dbeafe;
+	border-color: #93c5fd;
+	box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.15);
+}
+
 .prose table {
 	width: 100%;
 	border-collapse: collapse;
